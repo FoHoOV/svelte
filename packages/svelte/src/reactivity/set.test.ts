@@ -107,6 +107,30 @@ test('set.forEach()', () => {
 	cleanup();
 });
 
+test('set.clear()', () => {
+	const set = new ReactiveSet([1, 2]);
+
+	const log: any = [];
+
+	const cleanup = effect_root(() => {
+		render_effect(() => {
+			log.push(set.has(1));
+		});
+
+		render_effect(() => {
+			log.push(set.has(2));
+		});
+	});
+
+	flushSync(() => {
+		set.clear();
+	});
+
+	assert.deepEqual(log, [true, true, false, false]);
+
+	cleanup();
+});
+
 test('not invoking reactivity when value is not in the set after changes', () => {
 	const set = new ReactiveSet([1, 2]);
 

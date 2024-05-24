@@ -31,7 +31,16 @@ export const INTERNAL_OBJECT = Symbol();
  * @prop {Interceptors<TEntityInstance, TWriteProperties, TReadProperties>} [interceptors] - an object of interceptors for `write_properties` that can customize how/when a `read_properties` should be notified of a change.
  */
 
-/** @typedef {Map<string | symbol | number, Map<unknown, import("#client").Source<boolean>>>} ReadMethodsSignals */
+/**
+ * @typedef {string | number | boolean | bigint | symbol | undefined | null} Primitives
+ * @typedef {{
+ *             primitives: Map<Primitives, import("#client").Source<boolean>>,
+ * 			   objects: WeakMap<Omit<WeakKey, symbol>, import("#client").Source<boolean>>,
+ * 			   all_params_notifier: import("#client").Source<boolean>
+ * }} TrackedValues
+ **/
+
+/** @typedef {Map<string | symbol | number, TrackedValues>} ReadMethodsSignals */
 
 /**
  * @template {new (...args: any) => any} TEntity
@@ -218,8 +227,20 @@ function get_read_signals(version_signal, read_methods_signals, property, option
 		(params.length == 0 ? [null] : params).forEach((param) => {
 			// read like methods that are reactive conditionally should create the signal (if not already created)
 			// so they can be reactive when notified based on their param
-			const sig = get_signal_for_function(read_methods_signals, property, param, true);
-			get(sig);
+			const specific_param_signal = get_signal_for_function(
+				read_methods_signals,
+				property,
+				param,
+				true
+			);
+			get(specific_param_signal);
+			const all_params = get_signal_for_function(
+				read_methods_signals,
+				property,
+				NOTIFY_WITH_ALL_REGISTERED_PARAMS,
+				true // true is actually not needed here (it has been already with specific_param_signal), but just to mute type-checking
+			);
+			get(all_params);
 		});
 	} else if (!options.write_properties.includes(property)) {
 		// other read like methods that are not reactive conditionally based their params and are just notified based on the version signal are here
@@ -254,9 +275,12 @@ function notify_read_properties(
 			);
 		}
 		if (params.length == 1 && params[0] == NOTIFY_WITH_ALL_REGISTERED_PARAMS) {
-			read_methods_signals.get(name)?.forEach((sig) => {
-				increment_signal(initial_version_signal_v, version_signal, sig);
-			});
+			const sig = get_signal_for_function(
+				read_methods_signals,
+				name,
+				NOTIFY_WITH_ALL_REGISTERED_PARAMS
+			);
+			sig && increment_signal(initial_version_signal_v, version_signal, sig);
 		} else {
 			(params.length == 0 ? [null] : params).forEach((param) => {
 				const sig = get_signal_for_function(read_methods_signals, name, param);
@@ -267,12 +291,12 @@ function notify_read_properties(
 }
 
 /**
- * gets the signal for this function based on params. If the signal doesn't exist and `create_signal_if_doesnt_exist` is not set to true, it creates a new one and returns that
+ * gets the signal for this function based on params.
  * @template {boolean} [TCreateSignalIfDoesntExist=false]
  * @param {ReadMethodsSignals} signals_map
  * @param {string | symbol | number} function_name
  * @param {unknown} param
- * @param {TCreateSignalIfDoesntExist} [create_signal_if_doesnt_exist=false]
+ * @param {TCreateSignalIfDoesntExist} [create_signal_if_doesnt_exist=false] - if set to true, it creates a new one on `signals_map` and returns that.
  * @returns {TCreateSignalIfDoesntExist extends true ? import("#client").Source<boolean> : import("#client").Source<boolean> | null }
  */
 function get_signal_for_function(
@@ -282,41 +306,51 @@ function get_signal_for_function(
 	// @ts-ignore: this should be supported in jsdoc based on https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#template but isn't?
 	create_signal_if_doesnt_exist = false
 ) {
-	/**
-	 * @type {Map<unknown, import("#client").Source<boolean>>}
-	 */
-	let params_to_signal_map;
-	if (!signals_map.has(function_name)) {
+	/** @type {TrackedValues | undefined} */
+	let tracked_values = signals_map.get(function_name);
+
+	if (!tracked_values) {
 		if (!create_signal_if_doesnt_exist) {
 			// @ts-ignore
 			return null;
 		}
-		params_to_signal_map = new Map([[param, source(false)]]);
-		signals_map.set(function_name, params_to_signal_map);
+		tracked_values = {
+			objects: new WeakMap(),
+			primitives: new Map(),
+			all_params_notifier: source(false)
+		};
+		signals_map.set(function_name, tracked_values);
+	}
+
+	if (param === NOTIFY_WITH_ALL_REGISTERED_PARAMS) {
+		// @ts-ignore
+		return tracked_values.all_params_notifier;
+	} else if (param && typeof param === 'object') {
+		// @ts-ignore
+		return get_or_create_signal(tracked_values.objects, param);
 	} else {
-		params_to_signal_map = /**
-		 * @type {Map<unknown[], import("#client").Source<boolean>>}
-		 */ (signals_map.get(function_name));
+		// @ts-ignore
+		return get_or_create_signal(tracked_values.primitives, param);
 	}
 
 	/**
-	 * @type {import("#client").Source<boolean>}
+	 * @template {TrackedValues["objects"] | TrackedValues["primitives"]} TMap
+	 * @param {TMap} map
+	 * @param {TMap extends TrackedValues["objects"] ? Omit<WeakKey, symbol> : Primitives} param
 	 */
-	let signal;
-	if (!params_to_signal_map.has(param)) {
-		if (!create_signal_if_doesnt_exist) {
+	function get_or_create_signal(map, param) {
+		// @ts-ignore
+		let signal = map.get(param);
+		if (!signal) {
+			if (!create_signal_if_doesnt_exist) {
+				return null;
+			}
+			signal = source(false);
 			// @ts-ignore
-			return null;
+			map.set(param, signal);
 		}
-		signal = source(false);
-		params_to_signal_map.set(param, signal);
-	} else {
-		signal = /**
-		 * @type {import("#client").Source<boolean>}
-		 */ (params_to_signal_map.get(param));
+		return signal;
 	}
-	// @ts-ignore
-	return signal;
 }
 
 /**
